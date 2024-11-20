@@ -1,7 +1,11 @@
 import os
 import cv2
 from ultralytics import YOLO
+import numpy as np
 import csv
+import time
+from collections import Counter
+import re
 
 # ----------------------------
 # Configurações Iniciais
@@ -12,22 +16,29 @@ VEHICLE_MODEL_PATH = 'data/yolov_models/yolov8n.pt'  # Modelo YOLOv8 para detec�
 PLATE_CASCADE_PATH = 'utils/haarcascade_russian_plate_number.xml'  # Haar Cascade para detecção de placas
 PLATE_RECOGNITION_MODEL_PATH = 'data/yolov_models/best_pre.pt'  # Modelo YOLOv8 treinado para reconhecimento de caracteres das placas
 OUTPUT_CSV_PATH = 'plates_detected_jaime.csv'  # Caminho para salvar as informações das placas
-PLATES_IMAGES_DIR = 'detected_plates_jaime'  # Diretório para salvar as imagens das placas detectadas
+PLATES_IMAGES_DIR = 'detected_plates_jaime'  # Diretório para salvar as imagens das placas detectadas (opcional)
+RESULT_FOLDER = 'resultados_from_video_jaime'  # Diretório para salvar os resultados do reconhecimento
 
 # Parâmetros
 VEHICLE_CONF_THRESHOLD = 0.5  # Confiança mínima para detecção de veículos
 ZOOM_SCALE = 2  # Fator de zoom para a placa
 
+# Parâmetros de Estado e Tempo
+DETECTION_TIMEOUT = 2  # Tempo em segundos para considerar que o veículo saiu da cena
+
 # ----------------------------
 # Funções Auxiliares
 # ----------------------------
 
-def save_plates_info(plates_info, output_csv=OUTPUT_CSV_PATH):
-    with open(output_csv, mode='w', newline='', encoding='utf-8') as file:
+def save_plate_info(plate_info, output_csv=OUTPUT_CSV_PATH):
+    with open(output_csv, mode='a', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        writer.writerow(['Frame', 'X1', 'Y1', 'X2', 'Y2', 'Plate_Number'])
-        for info in plates_info:
-            writer.writerow(info)
+        writer.writerow(plate_info)
+
+def is_valid_plate(plate):
+    # Exemplo de regex para placas brasileiras (AAA-9999 ou AAA9A99)
+    pattern = r'^[A-Z]{3}\d{4}$|^[A-Z]{3}\d[A-Z]\d{2}$'
+    return re.match(pattern, plate) is not None
 
 def detect_vehicles(frame, model, conf_threshold=VEHICLE_CONF_THRESHOLD):
     results = model(frame, conf=conf_threshold)
@@ -68,8 +79,8 @@ def recognize_plate_characters(plate_roi, recognition_model):
 def detect_and_recognize_plate(frame, plate_cascade, vehicle_boxes, plate_recognition_model, frame_number):
     plates_info = []
     
-    if not os.path.exists(PLATES_IMAGES_DIR):
-        os.makedirs(PLATES_IMAGES_DIR)
+    if not os.path.exists(RESULT_FOLDER):
+        os.makedirs(RESULT_FOLDER)
     
     for box in vehicle_boxes:
         x1, y1, x2, y2 = box
@@ -86,16 +97,8 @@ def detect_and_recognize_plate(frame, plate_cascade, vehicle_boxes, plate_recogn
             px2_abs, py2_abs = px1_abs + pw, py1_abs + ph
             plate_roi = vehicle_roi[py:py + ph, px:px + pw]
             
-            # Ampliar a imagem da placa para maior clareza
-            zoomed_plate = cv2.resize(plate_roi, None, fx=ZOOM_SCALE, fy=ZOOM_SCALE, interpolation=cv2.INTER_LINEAR)
-            
-            # Salvar a imagem ampliada da placa
-            plate_image_filename = f"frame_{frame_number}_plate_{idx + 1}.jpg"
-            plate_image_path = os.path.join(PLATES_IMAGES_DIR, plate_image_filename)
-            cv2.imwrite(plate_image_path, zoomed_plate)
-            
-            # Reconhecer os caracteres na placa ampliada
-            plate_text = recognize_plate_characters(zoomed_plate, plate_recognition_model)
+            # Reconhecer os caracteres na placa
+            plate_text = recognize_plate_characters(plate_roi, plate_recognition_model)
             plates_info.append((frame_number, px1_abs, py1_abs, px2_abs, py2_abs, plate_text))
             
             # Desenhar a placa e o texto reconhecido na imagem
@@ -116,7 +119,15 @@ def live_video_capture(vehicle_model, plate_cascade, plate_recognition_model, co
         return
     
     frame_count = 0
-    plates_info_all = []
+    plates_buffer = []
+    vehicle_present = False
+    last_detection_time = 0
+    
+    # Inicializar o CSV com cabeçalho se não existir
+    if not os.path.exists(OUTPUT_CSV_PATH):
+        with open(OUTPUT_CSV_PATH, mode='w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Frame', 'X1', 'Y1', 'X2', 'Y2', 'Plate_Number'])
     
     while True:
         ret, frame = cap.read()
@@ -124,19 +135,70 @@ def live_video_capture(vehicle_model, plate_cascade, plate_recognition_model, co
             break
         
         frame_count += 1
-        frame_with_vehicles, vehicle_boxes = detect_vehicles(frame.copy(), vehicle_model, conf_threshold)
-        frame_with_plates, plates_info = detect_and_recognize_plate(frame_with_vehicles, plate_cascade, vehicle_boxes, plate_recognition_model, frame_count)
-        plates_info_all.extend(plates_info)
+        current_time = time.time()
         
-        cv2.imshow('Live Video Feed', frame_with_plates)
+        # Detectar veículos
+        frame_with_vehicles, vehicle_boxes = detect_vehicles(frame.copy(), vehicle_model, conf_threshold)
+        
+        if vehicle_boxes:
+            # Veículo está presente
+            if not vehicle_present:
+                # Novo veículo detectado
+                vehicle_present = True
+                plates_buffer = []  # Resetar o buffer
+                print("Veículo detectado. Iniciando coleta de placas.")
+            
+            last_detection_time = current_time
+            
+            # Detectar e reconhecer placas
+            frame_with_plates, plates_info = detect_and_recognize_plate(frame_with_vehicles, plate_cascade, vehicle_boxes, plate_recognition_model, frame_count)
+            plates_buffer.extend(plates_info)
+        else:
+            # Nenhum veículo detectado
+            if vehicle_present and (current_time - last_detection_time) > DETECTION_TIMEOUT:
+                # Veículo saiu da cena
+                vehicle_present = False
+                print("Veículo saiu da cena. Processando leituras de placas.")
+                
+                if plates_buffer:
+                    # Agregar as leituras de placas
+                    plate_texts = [info[5] for info in plates_buffer]
+                    plate_counts = Counter(plate_texts)
+                    
+                    # Selecionar a placa mais comum
+                    most_common_plate, count = plate_counts.most_common(1)[0]
+                    
+                    # Validar a placa
+                    if is_valid_plate(most_common_plate):
+                        # Obter as coordenadas da placa para registro (usando a primeira ocorrência)
+                        for info in plates_buffer:
+                            if info[5] == most_common_plate:
+                                frame_num, x1, y1, x2, y2, plate = info
+                                break
+                        
+                        # Salvar no CSV
+                        save_plate_info([frame_num, x1, y1, x2, y2, most_common_plate])
+                        print(f"Placa registrada: {most_common_plate} no frame {frame_num}")
+                        
+                        # Opcional: Salvar a imagem da placa
+                        if not os.path.exists(PLATES_IMAGES_DIR):
+                            os.makedirs(PLATES_IMAGES_DIR)
+                        plate_image = frame[y1:y2, x1:x2]
+                        plate_image_path = os.path.join(PLATES_IMAGES_DIR, f"{most_common_plate}_{frame_num}.jpg")
+                        cv2.imwrite(plate_image_path, plate_image)
+                    else:
+                        print(f"Leitura de placa inválida: {most_common_plate}")
+                
+                plates_buffer = []  # Resetar o buffer
+        
+        # Exibir o frame com as detecções
+        cv2.imshow('Live Video Feed', frame_with_vehicles if vehicle_present else frame_with_vehicles)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     
     cap.release()
     cv2.destroyAllWindows()
-    
-    save_plates_info(plates_info_all, OUTPUT_CSV_PATH)
     print(f"Informações das placas salvas em {OUTPUT_CSV_PATH}")
     print(f"Imagens das placas salvas na pasta '{PLATES_IMAGES_DIR}'.")
 
