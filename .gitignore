@@ -1,0 +1,18 @@
+# Ignorar todas as pastas e arquivos, exceto os especificados
+*
+
+# Exceções
+!.gitignore
+!README.md
+!requirements.txt
+!*.py
+
+# Ignorar arquivos gerados
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# Ignorar pastas específicas (opcional, caso queira)
+detected_plates_jaime/
+resultados_from_video_jaime/
