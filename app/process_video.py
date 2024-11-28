@@ -19,6 +19,12 @@ OUTPUT_CSV_PATH = 'plates_detected_jaime.csv'
 # Parâmetros
 VEHICLE_CONF_THRESHOLD = 0.5
 
+# URLs RTSP das câmeras do DVR
+RTSP_CAMERAS = [
+    "rtsp://192.168.1.100:554/cam/realmonitor?channel=1&subtype=0",  # Câmera 1
+    "rtsp://192.168.1.100:554/cam/realmonitor?channel=2&subtype=0",  # Câmera 2  
+]
+
 # Para armazenar o último horário em que cada placa foi detectada
 last_seen_plates = {}
 
@@ -26,7 +32,7 @@ last_seen_plates = {}
 # Funções Auxiliares
 # ----------------------------
 
-def save_plate_info(plate, bounding_box, timestamp, output_csv=OUTPUT_CSV_PATH):
+def save_plate_info(plate, bounding_box, timestamp, camera_id, output_csv=OUTPUT_CSV_PATH):
     """
     Salva apenas a última ocorrência de uma placa no CSV.
     """
@@ -42,8 +48,8 @@ def save_plate_info(plate, bounding_box, timestamp, output_csv=OUTPUT_CSV_PATH):
     # Salva no CSV
     with open(output_csv, mode='a', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        writer.writerow([plate, bounding_box, timestamp])
-    print(f"Placa {plate} registrada no CSV às {timestamp}")
+        writer.writerow([camera_id, plate, bounding_box, timestamp])
+    print(f"Placa {plate} registrada no CSV pela câmera {camera_id} às {timestamp}")
 
 def is_valid_plate(plate):
     """
@@ -119,36 +125,40 @@ def detect_and_recognize_plate(frame, plate_cascade, vehicle_boxes, plate_recogn
 
 def live_video_capture(vehicle_model, plate_cascade, plate_recognition_model):
     """
-    Realiza a captura de vídeo e processa os frames ao vivo.
+    Realiza a captura de vídeo e processa os streams das câmeras RTSP.
     """
-    cap = cv2.VideoCapture(0)
-
-    if not cap.isOpened():
-        print("Erro ao acessar a webcam.")
-        return
-
     # Inicializar o CSV com cabeçalho, se necessário
     if not os.path.exists(OUTPUT_CSV_PATH):
         with open(OUTPUT_CSV_PATH, mode='w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
-            writer.writerow(['Plate_Number', 'Bounding_Box', 'Timestamp'])
+            writer.writerow(['Camera_ID', 'Plate_Number', 'Bounding_Box', 'Timestamp'])
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    for camera_id, rtsp_url in enumerate(RTSP_CAMERAS, start=1):
+        print(f"Iniciando captura da câmera {camera_id} ({rtsp_url})...")
+        cap = cv2.VideoCapture(rtsp_url)
 
-        frame, vehicle_boxes = detect_vehicles(frame, vehicle_model)
+        if not cap.isOpened():
+            print(f"Erro ao acessar o stream da câmera {camera_id}.")
+            continue
 
-        plates_info = detect_and_recognize_plate(frame, plate_cascade, vehicle_boxes, plate_recognition_model)
-        for plate, bounding_box, timestamp in plates_info:
-            save_plate_info(plate, bounding_box, timestamp)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print(f"Falha ao capturar frame da câmera {camera_id}.")
+                break
 
-        cv2.imshow('Live Video Feed', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            frame, vehicle_boxes = detect_vehicles(frame, vehicle_model)
+            plates_info = detect_and_recognize_plate(frame, plate_cascade, vehicle_boxes, plate_recognition_model)
 
-    cap.release()
+            for plate, bounding_box, timestamp in plates_info:
+                save_plate_info(plate, bounding_box, timestamp, camera_id)
+
+            cv2.imshow(f'Câmera {camera_id}', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+
     cv2.destroyAllWindows()
 
 # ----------------------------
