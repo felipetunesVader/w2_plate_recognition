@@ -1,5 +1,5 @@
 # Ignorar todas as pastas e arquivos, exceto os especificados
-*
+
 
 # Exceções
 !.gitignore
@@ -16,3 +16,4 @@ __pycache__/
 # Ignorar pastas específicas (opcional, caso queira)
 detected_plates_jaime/
 resultados_from_video_jaime/
+data/
